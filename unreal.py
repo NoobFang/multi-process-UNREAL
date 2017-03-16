@@ -13,6 +13,7 @@ class UNREAL(object):
     # TODO:get the observation shape and action number
     self.ob_shape
     self.action_n
+    # define the network stored in ps which is used to sync
     worker_device = '/job:worker/task:{}'.format(task)
     with tf.device(tf.train.replica_device_setter(1, worker_device=worker_device)):
       with tf.variable_scope('global'):
@@ -21,7 +22,7 @@ class UNREAL(object):
         self.global_step = tf.get_variable('global_step', [], tf.int32, 
                                           initializer=tf.constant(0, dtype=tf.int32),
                                           trainable=False)
-
+    # define the local network which is used to calculate the gradient
     with tf.device(worker_device):
       with tf.variable_scope('local'):
         self.local_network = pi = UnrealNetwork(env.observation_space.shape, 
@@ -38,30 +39,31 @@ class UNREAL(object):
       
       # define the loss of base-a3c agent
       def _base_loss(self):
-        log_pi = tf.log(tf.clip_by_value(self.pi.base_pi, 1e-12, 1.0))
-        entropy = - tf.reduce_sum(self.pi.base_pi*log_pi, axis=1)
+        log_pi = tf.log(tf.clip_by_value(pi.base_pi, 1e-12, 1.0))
+        entropy = - tf.reduce_sum(pi.base_pi*log_pi, axis=1)
         policy_loss = - tf.reduce_sum(tf.reduce_sum(log_pi*self.a, axis=1)*self.adv)
-        value_loss = 0.5 * tf.nn.l2_loss(self.pi.base_v - self.r)
+        value_loss = 0.5 * tf.nn.l2_loss(pi.base_v - self.r)
         return policy_loss + value_loss - entropy * ENTROPY_BETA
 
       # define the loss of pixel control task
       def _pc_loss(self):
         reshaped_a = tf.reshape(self.pc_a, [-1, 1, 1, self.action_n])
-        qa = tf.reduce_sum(self.pi.pc_q * reshaped_a, axis=3)
+        qa = tf.reduce_sum(pi.pc_q * reshaped_a, axis=3)
         pc_loss = PIXEL_CHANGE_LAMBDA * tf.nn.l2_loss(self.pc_r - qa)
         return pc_loss
       
       #define the loss of reward prediction task
       def _rp_loss(self):
-        rp_c = tf.clip_by_value(self.pi.rp_c, 1e-12, 1.0)
+        rp_c = tf.clip_by_value(pi.rp_c, 1e-12, 1.0)
         rp_loss = - tf.reduce_sum(self.rp_c * tf.log(rp_c))
         return rp_loss
 
       # define the loss of value function replay task
       def _vr_loss(self):
-        vr_loss = tf.nn.l2_loss(self.vr_r - self.pi.vr_v)
+        vr_loss = tf.nn.l2_loss(self.vr_r - pi.vr_v)
         return vr_loss
 
       # TODO: using multiple runner threads to run policy interact with
       # environment to get rollouts and fill the exp buffer
+      self.runner = RunnerThread(env, pi, 20, visualise) # 20 is the number of time-steps considered in lstm network
       
