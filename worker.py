@@ -7,7 +7,6 @@ import tensorflow as tf
 import logging
 import argparse
 import sys, signal, time, os
-from train.trainer import Trainer
 from environment.environment import Environment
 from unreal import UNREAL
 from constants import *
@@ -52,7 +51,7 @@ def run(args, server):
                            save_model_secs=600,
                            save_summaries_secs=120)
   
-  num_global_steps = 1e8
+  num_global_steps = MAX_TRAIN_STEP
 
   logger.info(
     'Starting session...\n'+'If this hangs, we are mostly likely waiting to' +
