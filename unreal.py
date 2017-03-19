@@ -3,7 +3,9 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf
+import tensorflow as tf\
+import six.moves.queue as queue
+import scipy.signal
 from model import UnrealNetwork
 from environment.environment import Environment
 from constants import *
@@ -15,7 +17,8 @@ def log_uniform(lo, hi):
   return out
 
 # TODO: define the environment runner and rollout and experience buffer
-
+def discount(x, gamma):
+  return scipy.signal.lfilter()
 
 class UNREAL(object):
   def __init__(self, env, task, visualise):
