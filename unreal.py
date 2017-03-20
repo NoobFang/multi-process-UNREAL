@@ -3,11 +3,11 @@ from __future__ import division
 from __future__ import print_function
 
 import numpy as np
-import tensorflow as tf\
-import six.moves.queue as queue
-import scipy.signal
+import tensorflow as tf
 from model import UnrealNetwork
+from experience import Experience, ExperienceFrame
 from environment.environment import Environment
+from env_runner import RunnerThread
 from constants import *
 
 # sample learning rate or weight for UNREAL model for log-uniform distribution
@@ -16,9 +16,28 @@ def log_uniform(lo, hi):
   out = np.exp(np.log(lo)*(1-r) + np.log(hi)*r)
   return out
 
-# TODO: define the environment runner and rollout and experience buffer
+# TODO: need to modify to handle the new version rollout data
 def discount(x, gamma):
-  return scipy.signal.lfilter()
+  return scipy.signal.lfilter([1], [1, -gamma], x[::-1], axis=0)[::-1]
+
+Batch = namedtuple('Batch', ['s', 'a', 'adv', 'r', 'terminal', 'features'])
+
+def process_rollout(rollout, gamma, lambda_=1.0):
+  '''
+  given a rollout, compute its returns and advantage
+  '''
+  batch_s = np.asarray(rollout.states)
+  batch_a = np.asarray(rollout.actions)
+  rewards = np.asarray(rollout.rewards)
+  v_predt = np.asarray(rollout.values + [rollout.r])
+  rewards_plus_v = np.asarray(rollout.rewards + [rollout.r])
+
+  batch_r = discount(rewards_plus_v, gamma)[:-1]
+  delta_t = rewards + gamma*v_predt[1:] - v_predt[:-1]
+  batch_adv = discount(delta_t, gamma*lambda_)
+  features = rollout.features[0]
+
+  return Batch(batch_s, batch_a, batch_adv, batch_r, rollout.terminal, features)
 
 class UNREAL(object):
   def __init__(self, env, task, visualise):
@@ -26,6 +45,7 @@ class UNREAL(object):
     self.task = task
     self.ob_shape = [HEIGHT, WIDTH, CHANNEL]
     self.action_n = Environment.get_action_size()
+    self.experience = Experience(EXPERIENCE_HISTORY_SIZE) # exp replay pool
     # define the network stored in ps which is used to sync
     worker_device = '/job:worker/task:{}'.format(task)
     with tf.device(tf.train.replica_device_setter(1, worker_device=worker_device)):
@@ -47,7 +67,7 @@ class UNREAL(object):
       self.pc_a = tf.placeholder(dtype=tf.int32, [None, self.action_n]) # The sampled action for pixel control task
       self.pc_r = tf.placeholder(dtype=tf.float32, [None, 20, 20]) # TD target of pixel control task
       self.rp_c = tf.placeholder(dtype=tf.int32, [1,3]) # one-hot target of reward prediction task
-      self.vr_r = tf.placeholder(dtype=tf.float32, [None])
+      self.vr_r = tf.placeholder(dtype=tf.float32, [None]) # target of value replay task
       
       # define the entropy of policy action output
       entropy = - tf.reduce_sum(pi.base_pi*log_pi, axis=1)
@@ -79,7 +99,7 @@ class UNREAL(object):
         vr_loss = tf.nn.l2_loss(self.vr_r - pi.vr_v)
 
       # define the runner handle the interaction with the environment
-      self.runner = RunnerThread(env, pi, 20, visualise) # 20 is the number of time-steps considered in lstm network
+      self.runner = RunnerThread(env, pi, self.experience, 20, visualise) # 20 is the number of time-steps considered in lstm network
       
       # get the gradients by local network computation
       self.loss = base_loss + pc_loss + rp_loss + vr_loss
