@@ -14,12 +14,6 @@ from constants import *
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-def log_uniform(lo, hi, rate):
-  log_lo = math.log(lo)
-  log_hi = math.log(hi)
-  v = log_lo * (1-rate) + log_hi * rate
-  return math.exp(v)
-
 def run(args, server):
   # create an environment chosed by global ENV_TYPE
   env = Environment.create_environment()
