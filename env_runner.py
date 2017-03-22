@@ -97,6 +97,7 @@ class RunnerThread(threading.Thread):
           rollout.append(frame)
         else:
           env.reset()
+          break
       yield rollout
 
   
