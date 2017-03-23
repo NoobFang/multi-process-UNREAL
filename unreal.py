@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 from model import UnrealModel
 from experience import Experience, ExperienceFrame
-from environment import Environment
+from environment.environment import Environment
 from constants import *
 
 # sample learning rate or weight for UNREAL model for log-uniform distribution
@@ -39,7 +39,7 @@ class UNREAL(object):
       with tf.variable_scope('local'):
         self.local_network = net = UnrealModel(self.action_n)
         net.global_step = self.global_step
-      
+    
       # add summaries for losses and norms
       self.batch_size = tf.to_float(tf.shape(net.base_input)[0])
       self.loss = self.prepare_loss()
@@ -380,6 +380,3 @@ class UNREAL(object):
     rp_c = tf.clip_by_value(net.rp_c, 1e-20, 1.0)
     rp_loss = - tf.reduce_sum(self.rp_r * tf.log(rp_c))
     return rp_loss
-
-
-    
