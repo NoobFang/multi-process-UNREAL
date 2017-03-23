@@ -15,13 +15,13 @@ class Environment(object):
   @staticmethod
   def create_environment():
     if ENV_TYPE == 'maze':
-      import maze_environment
+      from environment import maze_environment
       return maze_environment.MazeEnvironment()
     elif ENV_TYPE == 'lab':
-      import lab_environment
+      from environment import lab_environment
       return lab_environment.LabEnvironment()
     else:
-      import gym_environment
+      from environment import gym_environment
       return gym_environment.GymEnvironment()
   
   @staticmethod
@@ -30,15 +30,15 @@ class Environment(object):
       return Environment.action_size
 
     if ENV_TYPE == 'maze':
-      import maze_environment
+      from environemnt import maze_environment
       Environment.action_size = \
         maze_environment.MazeEnvironment.get_action_size()
     elif ENV_TYPE == "lab":
-      import lab_environment
+      from environment import lab_environment
       Environment.action_size = \
         lab_environment.LabEnvironment.get_action_size()
     else:
-      import gym_environment
+      from environment import gym_environment
       Environment.action_size = \
         gym_environment.GymEnvironment.get_action_size()
     return Environment.action_size

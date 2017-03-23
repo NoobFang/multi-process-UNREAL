@@ -7,7 +7,7 @@ import tensorflow as tf
 import logging
 import argparse
 import sys, signal, time, os
-from environment import Environment
+from environment.environment import Environment
 from unreal import UNREAL
 from constants import *
 

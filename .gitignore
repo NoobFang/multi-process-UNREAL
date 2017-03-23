@@ -6,3 +6,10 @@ checkpoints*/*
 memo.txt
 old
 .DS_Store
+assets
+baselab
+deepmind
+q3map2
+bspc*
+libdmlab.so
+deepmind_lab.so
