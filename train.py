@@ -22,13 +22,13 @@ def new_cmd(sess, name, cmd):
   return name, command
 
 # create command for launching TF workers
-def create_cmd(sess, num_workers=4, env_id, logdir, visualise=False):
+def create_cmd(sess, num_workers, env_id, logdir, visualise=False):
   base_cmd = [
     'CUDA_VISIBLE_DEVICES=',
     sys.executable, 'worker.py',
-    '--logdir', logdir,
-    '--env_id', env_id,
-    '--num_workers', str(num_workers)
+    '--log-dir', logdir,
+    '--env-id', env_id,
+    '--num-workers', str(num_workers)
   ]
 
   if visualise:
@@ -69,7 +69,8 @@ def create_cmd(sess, num_workers=4, env_id, logdir, visualise=False):
 
 def run():
   args = parser.parse_args()
-  cmds, notes = create_cmd('unreal', args.num_workers, args.env_id, args.logdir, args.visualise)
+  #cmds, notes = create_cmd('unreal', args.num_workers, args.env_id, args.logdir, args.visualise)
+  cmds, notes = create_cmd('unreal', num_workers=PARALLEL_SIZE, env_id=ENV_NAME, logdir=LOG_FILE)
   print('Executing the following commands:')
   print('\n'.join(cmds))
   print('')

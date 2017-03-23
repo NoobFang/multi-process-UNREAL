@@ -141,4 +141,4 @@ class Experience(object):
       frame = self._frames[raw_start_frame_index+i]
       sampled_frames.append(frame)
 
-    return sampled_frame
+    return sampled_frames

@@ -34,6 +34,9 @@ class UnrealModel(object):
                for_display=False):
     self._action_size = action_size
     self._create_network(for_display)
+
+    self.var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
+                                      tf.get_variable_scope().name)
     
     
   def _create_network(self, for_display):
@@ -247,91 +250,6 @@ class UnrealModel(object):
     self.rp_c = tf.nn.softmax(tf.matmul(rp_conv_output_rehaped, W_fc1) + b_fc1)
     # (1,3)
 
-  def _base_loss(self):
-    # [base A3C]
-    # Taken action (input for policy)
-    self.base_a = tf.placeholder("float", [None, self._action_size])
-    
-    # Advantage (R-V) (input for policy)
-    self.base_adv = tf.placeholder("float", [None])
-    
-    # Avoid NaN with clipping when value in pi becomes zero
-    log_pi = tf.log(tf.clip_by_value(self.base_pi, 1e-20, 1.0))
-    
-    # Policy entropy
-    entropy = -tf.reduce_sum(self.base_pi * log_pi, reduction_indices=1)
-    
-    # Policy loss (output)
-    policy_loss = -tf.reduce_sum( tf.reduce_sum( tf.multiply( log_pi, self.base_a ),
-                                                 reduction_indices=1 ) *
-                                  self.base_adv + entropy * ENTROPY_BETA)
-    
-    # R (input for value target)
-    self.base_r = tf.placeholder("float", [None])
-    
-    # Value loss (output)
-    # (Learning rate for Critic is half of Actor's, so multiply by 0.5)
-    value_loss = 0.5 * tf.nn.l2_loss(self.base_r - self.base_v)
-    
-    base_loss = policy_loss + value_loss
-    return base_loss
-
-  
-  def _pc_loss(self):
-    # [pixel change]
-    self.pc_a = tf.placeholder("float", [None, self._action_size])
-    pc_a_reshaped = tf.reshape(self.pc_a, [-1, 1, 1, self._action_size])
-
-    # Extract Q for taken action
-    pc_qa_ = tf.multiply(self.pc_q, pc_a_reshaped)
-    pc_qa = tf.reduce_sum(pc_qa_, reduction_indices=3, keep_dims=False)
-    # (-1, 20, 20)
-      
-    # TD target for Q
-    self.pc_r = tf.placeholder("float", [None, 20, 20])
-
-    pc_loss = PIXEL_CHANGE_LAMBDA * tf.nn.l2_loss(self.pc_r - pc_qa)
-    return pc_loss
-
-  
-  def _vr_loss(self):
-    # R (input for value)
-    self.vr_r = tf.placeholder("float", [None])
-    
-    # Value loss (output)
-    vr_loss = tf.nn.l2_loss(self.vr_r - self.vr_v)
-    return vr_loss
-
-
-  def _rp_loss(self):
-    # reward prediction target. one hot vector
-    self.rp_c_target = tf.placeholder("float", [1,3])
-    
-    # Reward prediction loss (output)
-    rp_c = tf.clip_by_value(self.rp_c, 1e-20, 1.0)
-    rp_loss = -tf.reduce_sum(self.rp_c_target * tf.log(rp_c))
-    return rp_loss
-    
-    
-  def prepare_loss(self):
-    with tf.device(self._device):
-      loss = self._base_loss()
-      
-      if USE_PIXEL_CHANGE:
-        pc_loss = self._pc_loss()
-        loss = loss + pc_loss
-
-      if USE_VALUE_REPLAY:
-        vr_loss = self._vr_loss()
-        loss = loss + vr_loss
-
-      if USE_REWARD_PREDICTION:
-        rp_loss = self._rp_loss()
-        loss = loss + rp_loss
-      
-      self.total_loss = loss
-
-
   def reset_state(self):
     self.base_lstm_state_out = tf.contrib.rnn.LSTMStateTuple(np.zeros([1, 256]),
                                                              np.zeros([1, 256]))
@@ -393,27 +311,7 @@ class UnrealModel(object):
     rp_c_out = sess.run( self.rp_c,
                          feed_dict = {self.rp_input : s_t} )
     return rp_c_out[0]
-
-  
-  def get_vars(self):
-    return self.variables
-  
-
-  def sync_from(self, src_netowrk, name=None):
-    src_vars = src_netowrk.get_vars()
-    dst_vars = self.get_vars()
-
-    sync_ops = []
-
-    with tf.device(self._device):
-      with tf.name_scope(name, "UnrealModel",[]) as name:
-        for(src_var, dst_var) in zip(src_vars, dst_vars):
-          sync_op = tf.assign(dst_var, src_var)
-          sync_ops.append(sync_op)
-
-        return tf.group(*sync_ops, name=name)
       
-
   def _fc_variable(self, weight_shape, name):
     name_w = "W_{0}".format(name)
     name_b = "b_{0}".format(name)

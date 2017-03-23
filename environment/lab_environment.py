@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import deepmind_lab
 
-from environment import environment
+import environment
 from constants import ENV_NAME, HEIGHT, WIDTH
 
 

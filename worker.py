@@ -7,7 +7,7 @@ import tensorflow as tf
 import logging
 import argparse
 import sys, signal, time, os
-from environment.environment import Environment
+from environment import Environment
 from unreal import UNREAL
 from constants import *
 
@@ -20,7 +20,7 @@ def run(args, server):
   trainer = UNREAL(env, args.task, args.visualise)
 
   variables_to_save = [v for v in tf.global_variables() if not v.name.startswith('local')]
-  init_op = tf.local_variables_initializer(variables_to_save)
+  init_op = tf.variables_initializer(variables_to_save)
   init_all_op = tf.global_variables_initializer()
   saver = tf.train.Saver(variables_to_save)
 
@@ -74,7 +74,7 @@ def cluster_spec(num_workers, num_ps):
     port += 1
   cluster['ps'] = all_ps
 
-  all_a3c = []
+  all_workers= []
   for _ in range(num_workers):
     all_workers.append('{}:{}'.format(host, port))
     port += 1
@@ -82,7 +82,7 @@ def cluster_spec(num_workers, num_ps):
 
   return cluster
 
-def main():
+def main(_):
   parser = argparse.ArgumentParser()
   parser.add_argument('-v', '--verbose', default=0, action='count',
                       dest='verbosity', help='set verbosity')
