@@ -48,7 +48,7 @@ def run(args, server):
   num_global_steps = MAX_TRAIN_STEP
 
   logger.info(
-    'Starting session...\n'+'If this hangs, we are mostly likely waiting to' +
+    'Starting session...\n'+'If this hangs, we are mostly likely waiting to ' +
     'connect to the parameter server.'
   )
   with sv.managed_session(server.target, config=config) as sess:
