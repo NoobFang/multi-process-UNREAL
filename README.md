@@ -1,5 +1,5 @@
 # Multi-process-UNREAL
-Implementa UNREAL model by parameter-server architecture instead of the [multi-threading version](https://github.com/miyosuda/unreal).
+Implement UNREAL model by parameter-server architecture instead of the [multi-threading version](https://github.com/miyosuda/unreal).
 
 ## Version 0.1
 * This version can make use all the cores of CPU rather than the original multi-threading version;
