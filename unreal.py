@@ -22,31 +22,39 @@ class UNREAL(object):
   def __init__(self, env, task, visualise):
     self.env = env
     self.task = task
-    self.episode_reward = 0
     self.ob_shape = [HEIGHT, WIDTH, CHANNEL]
     self.action_n = Environment.get_action_size()
-    self.experience = Experience(EXPERIENCE_HISTORY_SIZE) # exp replay pool
     # define the network stored in ps which is used to sync
     worker_device = '/job:worker/task:{}'.format(task)
     with tf.device(tf.train.replica_device_setter(1, worker_device=worker_device)):
       with tf.variable_scope('global'):
-        self.network = UnrealModel(self.action_n)
+        self.experience = Experience(EXPERIENCE_HISTORY_SIZE) # exp replay pool
+        self.network = UnrealModel(self.action_n, self.env, self.experience)
         self.global_step = tf.get_variable('global_step', dtype=tf.int32, 
                                           initializer=tf.constant(0, dtype=tf.int32),
                                           trainable=False)
     # define the local network which is used to calculate the gradient
     with tf.device(worker_device):
       with tf.variable_scope('local'):
-        self.local_network = net = UnrealModel(self.action_n)
+        self.local_network = net = UnrealModel(self.action_n, self.env, self.experience)
         net.global_step = self.global_step
     
       # add summaries for losses and norms
       self.batch_size = tf.to_float(tf.shape(net.base_input)[0])
-      self.loss = self.prepare_loss()
+      base_loss = self.local_network.base_loss
+      pc_loss = self.local_network.pc_loss
+      rp_loss = self.local_network.rp_loss
+      vr_loss = self.local_network.vr_loss
+      entropy = tf.reduce_sum(self.local_network.entropy)
+      self.loss = base_loss + pc_loss + rp_loss + vr_loss
       grads = tf.gradients(self.loss, net.var_list)
+      tf.summary.scalar('model/a3c_loss', base_loss / self.batch_size)
+      tf.summary.scalar('model/pc_loss', pc_loss / self.batch_size)
+      tf.summary.scalar('model/rp_loss', rp_loss / self.batch_size)
+      tf.summary.scalar('model/vr_loss', vr_loss / self.batch_size)
       tf.summary.scalar('model/grad_global_norm', tf.global_norm(grads))
       tf.summary.scalar('model/var_global_norm', tf.global_norm(net.var_list))
-      tf.summary.scalar('model/entropy', self.entropy / self.batch_size)
+      tf.summary.scalar('model/entropy', entropy / self.batch_size)
       tf.summary.image('model/state', net.base_input)
       self.summary_op = tf.summary.merge_all()
       
@@ -102,49 +110,25 @@ class UNREAL(object):
       self.fill_experience(sess)
       return 0
     
-    # [Base]
-    batch_si, batch_last_action_rewards, batch_a, batch_adv, batch_R, start_lstm_state = \
-      self._process_a3c(sess)
+    batch_data = self.local_network.get_batch_data(sess)
+
     feed_dict = {
-      self.local_network.base_input: batch_si,
-      self.local_network.base_last_action_reward_input: batch_last_action_rewards,
-      self.base_a: batch_a,
-      self.base_adv: batch_adv,
-      self.base_r: batch_R,
-      self.local_network.base_initial_lstm_state: start_lstm_state
+      self.local_network.base_input: batch_data[0],
+      self.local_network.base_last_action_reward_input: batch_data[1],
+      self.local_network.base_a: batch_data[2],
+      self.local_network.base_adv: batch_data[3],
+      self.local_network.base_r: batch_data[4],
+      self.local_network.base_initial_lstm_state: batch_data[5],
+      self.local_network.pc_input: batch_data[6],
+      self.local_network.pc_last_action_reward_input: batch_data[7],
+      self.local_network.pc_a: batch_data[8],
+      self.local_network.pc_r: batch_data[9],
+      self.local_network.vr_input: batch_data[10],
+      self.local_network.vr_last_action_reward_input: batch_data[11],
+      self.local_network.vr_r: batch_data[12],
+      self.local_network.rp_input: batch_data[13],
+      self.local_network.rp_r: batch_data[14]
     }
-
-    # [Pixel change]
-    if USE_PIXEL_CHANGE:
-      batch_pc_si, batch_pc_last_action_reward, batch_pc_a, batch_pc_R = self._process_pc(sess)
-
-      pc_feed_dict = {
-        self.local_network.pc_input: batch_pc_si,
-        self.local_network.pc_last_action_reward_input: batch_pc_last_action_reward,
-        self.pc_a: batch_pc_a,
-        self.pc_r: batch_pc_R
-      }
-      feed_dict.update(pc_feed_dict)
-
-    # [Value replay]
-    if USE_VALUE_REPLAY:
-      batch_vr_si, batch_vr_last_action_reward, batch_vr_R = self._process_vr(sess)
-      
-      vr_feed_dict = {
-        self.local_network.vr_input: batch_vr_si,
-        self.local_network.vr_last_action_reward_input : batch_vr_last_action_reward,
-        self.vr_r: batch_vr_R
-      }
-      feed_dict.update(vr_feed_dict)
-
-    # [Reward prediction]
-    if USE_REWARD_PREDICTION:
-      batch_rp_si, batch_rp_c = self._process_rp()
-      rp_feed_dict = {
-        self.local_network.rp_input: batch_rp_si,
-        self.rp_r: batch_rp_c
-      }
-      feed_dict.update(rp_feed_dict)
 
     should_summarize = self.task==0 and self.local_step%11==0
 
@@ -159,224 +143,3 @@ class UNREAL(object):
       self.summary_writer.add_summary(tf.Summary.FromString(fetched[0]), fetched[-1])
       self.summary_writer.flush()
     self.local_step += 1
-
-  def _process_a3c(self, sess):
-    states = []
-    last_action_rewards = []
-    actions = []
-    rewards = []
-    values = []
-    terminal_end = False
-    start_lstm_state = self.local_network.base_lstm_state_out
-    for _ in range(LOCAL_T_MAX):
-      last_action = self.env.last_action
-      last_reward = self.env.last_reward
-      last_action_reward = ExperienceFrame.concat_action_and_reward(last_action,
-                                                                    self.action_n,
-                                                                    last_reward)
-      pi_, value_ = self.local_network.run_base_policy_and_value(sess,
-                                                                self.env.last_state,
-                                                                last_action_reward)
-      action = choose_action(pi_)
-      states.append(self.env.last_state)
-      last_action_rewards.append(last_action_reward)
-      actions.append(action)
-      values.append(value_)
-
-      prev_state = self.env.last_state
-
-      # Process game
-      new_state, reward, terminal, pixel_change = self.env.process(action)
-      frame = ExperienceFrame(prev_state, reward, action, terminal, pixel_change,
-                              last_action, last_reward)
-
-      # Store to experience
-      self.experience.add_frame(frame)
-
-      self.episode_reward += reward
-
-      rewards.append(reward)
-
-      if terminal:
-        terminal_end = True
-        print("score={}".format(self.episode_reward))
-          
-        self.episode_reward = 0
-        self.env.reset()
-        self.local_network.reset_state()
-        break
-
-    R = 0.0
-    if not terminal_end:
-      R = self.local_network.run_base_value(sess, new_state, frame.get_last_action_reward(self.action_n))
-
-    actions.reverse()
-    states.reverse()
-    rewards.reverse()
-    values.reverse()
-
-    batch_si = []
-    batch_a = []
-    batch_adv = []
-    batch_R = []
-
-    for(ai, ri, si, Vi) in zip(actions, rewards, states, values):
-      R = ri + GAMMA * R
-      adv = R - Vi
-      a = np.zeros([self.action_n])
-      a[ai] = 1.0
-
-      batch_si.append(si)
-      batch_a.append(a)
-      batch_adv.append(adv)
-      batch_R.append(R)
-
-    batch_si.reverse()
-    batch_a.reverse()
-    batch_adv.reverse()
-    batch_R.reverse()
-    
-    return batch_si, last_action_rewards, batch_a, batch_adv, batch_R, start_lstm_state
-
-  def _process_pc(self, sess):
-    # [pixel change]
-    # Sample 20+1 frame (+1 for last next state)
-    pc_experience_frames = self.experience.sample_sequence(LOCAL_T_MAX+1)
-    # Revese sequence to calculate from the last
-    pc_experience_frames.reverse()
-
-    batch_pc_si = []
-    batch_pc_a = []
-    batch_pc_R = []
-    batch_pc_last_action_reward = []
-    
-    pc_R = np.zeros([20,20], dtype=np.float32)
-    if not pc_experience_frames[0].terminal:
-      pc_R = self.local_network.run_pc_q_max(sess,
-                                             pc_experience_frames[0].state,
-                                             pc_experience_frames[0].get_last_action_reward(self.action_n))
-
-
-    for frame in pc_experience_frames[1:]:
-      pc_R = frame.pixel_change + GAMMA * pc_R
-      a = np.zeros([self.action_n])
-      a[frame.action] = 1.0
-      last_action_reward = frame.get_last_action_reward(self.action_n)
-      
-      batch_pc_si.append(frame.state)
-      batch_pc_a.append(a)
-      batch_pc_R.append(pc_R)
-      batch_pc_last_action_reward.append(last_action_reward)
-
-    batch_pc_si.reverse()
-    batch_pc_a.reverse()
-    batch_pc_R.reverse()
-    batch_pc_last_action_reward.reverse()
-    
-    return batch_pc_si, batch_pc_last_action_reward, batch_pc_a, batch_pc_R
-
-  def _process_vr(self, sess):
-    # [Value replay]
-    # Sample 20+1 frame (+1 for last next state)
-    vr_experience_frames = self.experience.sample_sequence(LOCAL_T_MAX+1)
-    # Revese sequence to calculate from the last
-    vr_experience_frames.reverse()
-
-    batch_vr_si = []
-    batch_vr_R = []
-    batch_vr_last_action_reward = []
-
-    vr_R = 0.0
-    if not vr_experience_frames[0].terminal:
-      vr_R = self.local_network.run_vr_value(sess,
-                                             vr_experience_frames[0].state,
-                                             vr_experience_frames[0].get_last_action_reward(self.action_n))
-    
-    # t_max times loop
-    for frame in vr_experience_frames[1:]:
-      vr_R = frame.reward + GAMMA * vr_R
-      batch_vr_si.append(frame.state)
-      batch_vr_R.append(vr_R)
-      last_action_reward = frame.get_last_action_reward(self.action_n)
-      batch_vr_last_action_reward.append(last_action_reward)
-
-    batch_vr_si.reverse()
-    batch_vr_R.reverse()
-    batch_vr_last_action_reward.reverse()
-
-    return batch_vr_si, batch_vr_last_action_reward, batch_vr_R
-
-  def _process_rp(self):
-    # [Reward prediction]
-    rp_experience_frames = self.experience.sample_rp_sequence()
-    # 4 frames
-
-    batch_rp_si = []
-    batch_rp_c = []
-    
-    for i in range(3):
-      batch_rp_si.append(rp_experience_frames[i].state)
-
-    # one hot vector for target reward
-    r = rp_experience_frames[3].reward
-    rp_c = [0.0, 0.0, 0.0]
-    if r == 0:
-      rp_c[0] = 1.0 # zero
-    elif r > 0:
-      rp_c[1] = 1.0 # positive
-    else:
-      rp_c[2] = 1.0 # negative
-    batch_rp_c.append(rp_c)
-    return batch_rp_si, batch_rp_c
-
-
-  def prepare_loss(self):
-    loss = self.base_loss()
-    tf.summary.scalar('model/a3c_loss', self.base_loss() / self.batch_size)
-    if USE_PIXEL_CHANGE:
-      loss += self.pc_loss()
-      tf.summary.scalar('model/pc_loss', self.pc_loss() / self.batch_size)
-    if USE_VALUE_REPLAY:
-      loss += self.vr_loss()
-      tf.summary.scalar('model/rp_loss', self.rp_loss() / self.batch_size)
-    if USE_REWARD_PREDICTION:
-      loss += self.rp_loss()
-      tf.summary.scalar('model/vr_loss', self.vr_loss() / self.batch_size)
-    return loss
-
-  def base_loss(self):
-    net = self.local_network
-    self.base_a = tf.placeholder(dtype=tf.float32, shape=[None, self.action_n], name='base_a')
-    self.base_adv = tf.placeholder(dtype=tf.float32, shape=[None], name='base_adv')
-    self.base_r = tf.placeholder(dtype=tf.float32, shape=[None], name='base_r')
-
-    log_pi = tf.log(tf.clip_by_value(net.base_pi, 1e-20, 1.0))
-    self.entropy = - tf.reduce_sum(net.base_pi*log_pi, axis=1)
-    policy_loss = - tf.reduce_sum(tf.reduce_sum(tf.multiply(log_pi, self.base_a),axis=1)*
-                                  self.base_adv + self.entropy * ENTROPY_BETA)
-    value_loss = 0.5 * tf.nn.l2_loss(self.base_r - net.base_v)
-    base_loss = policy_loss + value_loss
-    return base_loss
-
-  def pc_loss(self):
-    net = self.local_network
-    self.pc_a = tf.placeholder(dtype=tf.float32, shape=[None, self.action_n], name='pc_a')
-    self.pc_r = tf.placeholder(dtype=tf.float32, shape=[None, 20, 20], name='pc_r')
-    pc_a_reshape = tf.reshape(self.pc_a, [-1, 1, 1, self.action_n])
-    pc_qa_ = tf.multiply(net.pc_q, pc_a_reshape)
-    pc_qa = tf.reduce_sum(pc_qa_, axis=3)
-    pc_loss = tf.nn.l2_loss(self.pc_r - pc_qa) * PIXEL_CHANGE_LAMBDA
-    return pc_loss
-  
-  def vr_loss(self):
-    net = self.local_network
-    self.vr_r = tf.placeholder(dtype=tf.float32, shape=[None], name='vr_r')
-    vr_loss = tf.nn.l2_loss(self.vr_r - net.vr_v)
-    return vr_loss
-
-  def rp_loss(self):
-    net = self.local_network
-    self.rp_r = tf.placeholder(dtype=tf.float32, shape=[1,3], name='rp_r')
-    rp_c = tf.clip_by_value(net.rp_c, 1e-20, 1.0)
-    rp_loss = - tf.reduce_sum(self.rp_r * tf.log(rp_c))
-    return rp_loss

@@ -10,7 +10,7 @@ EN_LOW = 5e-4    # log_uniform low limit for entropy cost
 EN_HIGH = 0.01   # log_uniform high limit for entropy cost
 PC_LOW = 0.01    # log_uniform low limit for pixel control loss weight
 PC_HIGH = 0.1    # log_uniform high limit for pixel control loss weight
-PARALLEL_SIZE = 2 # parallel thread size
+PARALLEL_SIZE = 8 # parallel thread size
 MAX_TRAIN_STEP = 1e8
 
 ENV_TYPE = 'lab' # 'lab' or 'gym' or 'maze'

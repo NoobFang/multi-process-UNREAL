@@ -6,8 +6,11 @@ from __future__ import print_function
 import tensorflow as tf
 import numpy as np
 
+from experience import Experience, ExperienceFrame
 from constants import *
 
+def choose_action(pi):
+  return np.random.choice(range(len(pi)), p=pi)
 
 # weight initialization based on muupan's code
 # https://github.com/muupan/async-rl/blob/master/a3c_ale.py
@@ -24,20 +27,23 @@ def conv_initializer(kernel_width, kernel_height, input_channels, dtype=tf.float
     return tf.random_uniform(shape, minval=-d, maxval=d)
   return _initializer
 
-
 class UnrealModel(object):
   """
   UNREAL algorithm network model.
   """
   def __init__(self,
                action_size,
+               env,
+               experience,
                for_display=False):
-    self._action_size = action_size
+    self.action_n = action_size
+    self.env = env
+    self.experience = experience
+    self.episode_reward = 0
     self._create_network(for_display)
-
+    self.base_loss, self.pc_loss, self.rp_loss, self.vr_loss, self.entropy = self.prepare_loss()
     self.var_list = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES,
                                       tf.get_variable_scope().name)
-    
     
   def _create_network(self, for_display):
     # lstm
@@ -68,7 +74,7 @@ class UnrealModel(object):
     self.base_input = tf.placeholder("float", [None, 84, 84, 3])
 
     # Last action and reward
-    self.base_last_action_reward_input = tf.placeholder("float", [None, self._action_size+1])
+    self.base_last_action_reward_input = tf.placeholder("float", [None, self.action_n+1])
     
     # Conv layers
     base_conv_output = self._base_conv_layers(self.base_input)
@@ -79,7 +85,6 @@ class UnrealModel(object):
     
     self.base_initial_lstm_state = tf.contrib.rnn.LSTMStateTuple(self.base_initial_lstm_state0,
                                                                  self.base_initial_lstm_state1)
-
     self.base_lstm_outputs, self.base_lstm_state = \
         self._base_lstm_layer(base_conv_output,
                               self.base_last_action_reward_input,
@@ -118,7 +123,7 @@ class UnrealModel(object):
       lstm_input = tf.concat([conv_output_fc, last_action_reward_input], 1)
       # (unroll_step, 256+action_size+1)
 
-      lstm_input_reshaped = tf.reshape(lstm_input, [1, -1, 256+self._action_size+1])
+      lstm_input_reshaped = tf.reshape(lstm_input, [1, -1, 256+self.action_n+1])
       # (1, unroll_step, 256+action_size+1)
 
       lstm_outputs, lstm_state = tf.nn.dynamic_rnn(self.lstm_cell,
@@ -136,7 +141,7 @@ class UnrealModel(object):
   def _base_policy_layer(self, lstm_outputs, reuse=False):
     with tf.variable_scope("base_policy", reuse=reuse) as scope:
       # Weight for policy output layer
-      W_fc_p, b_fc_p = self._fc_variable([256, self._action_size], "base_fc_p")
+      W_fc_p, b_fc_p = self._fc_variable([256, self.action_n], "base_fc_p")
       # Policy (output)
       base_pi = tf.nn.softmax(tf.matmul(lstm_outputs, W_fc_p) + b_fc_p)
       return base_pi
@@ -158,7 +163,7 @@ class UnrealModel(object):
     self.pc_input = tf.placeholder("float", [None, 84, 84, 3])
 
     # Last action and reward
-    self.pc_last_action_reward_input = tf.placeholder("float", [None, self._action_size+1])
+    self.pc_last_action_reward_input = tf.placeholder("float", [None, self.action_n+1])
 
     # pc conv layers
     pc_conv_output = self._base_conv_layers(self.pc_input, reuse=True)
@@ -187,7 +192,7 @@ class UnrealModel(object):
         
       W_pc_deconv_v, b_pc_deconv_v = self._conv_variable([4, 4, 1, 32],
                                                          "pc_deconv_v", deconv=True)
-      W_pc_deconv_a, b_pc_deconv_a = self._conv_variable([4, 4, self._action_size, 32],
+      W_pc_deconv_a, b_pc_deconv_a = self._conv_variable([4, 4, self.action_n, 32],
                                                          "pc_deconv_a", deconv=True)
       
       h_pc_fc1 = tf.nn.relu(tf.matmul(lstm_outputs, W_pc_fc1) + b_pc_fc1)
@@ -218,7 +223,7 @@ class UnrealModel(object):
     self.vr_input = tf.placeholder("float", [None, 84, 84, 3])
 
     # Last action and reward
-    self.vr_last_action_reward_input = tf.placeholder("float", [None, self._action_size+1])
+    self.vr_last_action_reward_input = tf.placeholder("float", [None, self.action_n+1])
 
     # VR conv layers
     vr_conv_output = self._base_conv_layers(self.vr_input, reuse=True)
@@ -345,6 +350,238 @@ class UnrealModel(object):
                              initializer=conv_initializer(w, h, input_channels))
     return weight, bias
 
+  def _process_a3c(self, sess):
+    states = []
+    last_action_rewards = []
+    actions = []
+    rewards = []
+    values = []
+    terminal_end = False
+    start_lstm_state = self.base_lstm_state_out
+    for _ in range(LOCAL_T_MAX):
+      last_action = self.env.last_action
+      last_reward = self.env.last_reward
+      last_action_reward = ExperienceFrame.concat_action_and_reward(last_action,
+                                                                    self.action_n,
+                                                                    last_reward)
+      pi_, value_ = self.run_base_policy_and_value(sess,
+                                                                self.env.last_state,
+                                                                last_action_reward)
+      action = choose_action(pi_)
+      states.append(self.env.last_state)
+      last_action_rewards.append(last_action_reward)
+      actions.append(action)
+      values.append(value_)
+
+      prev_state = self.env.last_state
+
+      # Process game
+      new_state, reward, terminal, pixel_change = self.env.process(action)
+      frame = ExperienceFrame(prev_state, reward, action, terminal, pixel_change,
+                              last_action, last_reward)
+
+      # Store to experience
+      self.experience.add_frame(frame)
+
+      self.episode_reward += reward
+
+      rewards.append(reward)
+
+      if terminal:
+        terminal_end = True
+        print("score={}".format(self.episode_reward))
+          
+        self.episode_reward = 0
+        self.env.reset()
+        self.reset_state()
+        break
+
+    R = 0.0
+    if not terminal_end:
+      R = self.run_base_value(sess, new_state, frame.get_last_action_reward(self.action_n))
+
+    actions.reverse()
+    states.reverse()
+    rewards.reverse()
+    values.reverse()
+
+    batch_si = []
+    batch_a = []
+    batch_adv = []
+    batch_R = []
+
+    for(ai, ri, si, Vi) in zip(actions, rewards, states, values):
+      R = ri + GAMMA * R
+      adv = R - Vi
+      a = np.zeros([self.action_n])
+      a[ai] = 1.0
+
+      batch_si.append(si)
+      batch_a.append(a)
+      batch_adv.append(adv)
+      batch_R.append(R)
+
+    batch_si.reverse()
+    batch_a.reverse()
+    batch_adv.reverse()
+    batch_R.reverse()
+    
+    return batch_si, last_action_rewards, batch_a, batch_adv, batch_R, start_lstm_state
+
+  def _process_pc(self, sess):
+    # [pixel change]
+    # Sample 20+1 frame (+1 for last next state)
+    pc_experience_frames = self.experience.sample_sequence(LOCAL_T_MAX+1)
+    # Revese sequence to calculate from the last
+    pc_experience_frames.reverse()
+
+    batch_pc_si = []
+    batch_pc_a = []
+    batch_pc_R = []
+    batch_pc_last_action_reward = []
+    
+    pc_R = np.zeros([20,20], dtype=np.float32)
+    if not pc_experience_frames[0].terminal:
+      pc_R = self.run_pc_q_max(sess,
+                                             pc_experience_frames[0].state,
+                                             pc_experience_frames[0].get_last_action_reward(self.action_n))
+
+
+    for frame in pc_experience_frames[1:]:
+      pc_R = frame.pixel_change + GAMMA * pc_R
+      a = np.zeros([self.action_n])
+      a[frame.action] = 1.0
+      last_action_reward = frame.get_last_action_reward(self.action_n)
+      
+      batch_pc_si.append(frame.state)
+      batch_pc_a.append(a)
+      batch_pc_R.append(pc_R)
+      batch_pc_last_action_reward.append(last_action_reward)
+
+    batch_pc_si.reverse()
+    batch_pc_a.reverse()
+    batch_pc_R.reverse()
+    batch_pc_last_action_reward.reverse()
+    
+    return batch_pc_si, batch_pc_last_action_reward, batch_pc_a, batch_pc_R
+
+  def _process_vr(self, sess):
+    # [Value replay]
+    # Sample 20+1 frame (+1 for last next state)
+    vr_experience_frames = self.experience.sample_sequence(LOCAL_T_MAX+1)
+    # Revese sequence to calculate from the last
+    vr_experience_frames.reverse()
+
+    batch_vr_si = []
+    batch_vr_R = []
+    batch_vr_last_action_reward = []
+
+    vr_R = 0.0
+    if not vr_experience_frames[0].terminal:
+      vr_R = self.run_vr_value(sess,
+                                             vr_experience_frames[0].state,
+                                             vr_experience_frames[0].get_last_action_reward(self.action_n))
+    
+    # t_max times loop
+    for frame in vr_experience_frames[1:]:
+      vr_R = frame.reward + GAMMA * vr_R
+      batch_vr_si.append(frame.state)
+      batch_vr_R.append(vr_R)
+      last_action_reward = frame.get_last_action_reward(self.action_n)
+      batch_vr_last_action_reward.append(last_action_reward)
+
+    batch_vr_si.reverse()
+    batch_vr_R.reverse()
+    batch_vr_last_action_reward.reverse()
+
+    return batch_vr_si, batch_vr_last_action_reward, batch_vr_R
+
+  def _process_rp(self):
+    # [Reward prediction]
+    rp_experience_frames = self.experience.sample_rp_sequence()
+    # 4 frames
+
+    batch_rp_si = []
+    batch_rp_c = []
+    
+    for i in range(3):
+      batch_rp_si.append(rp_experience_frames[i].state)
+
+    # one hot vector for target reward
+    r = rp_experience_frames[3].reward
+    rp_c = [0.0, 0.0, 0.0]
+    if r == 0:
+      rp_c[0] = 1.0 # zero
+    elif r > 0:
+      rp_c[1] = 1.0 # positive
+    else:
+      rp_c[2] = 1.0 # negative
+    batch_rp_c.append(rp_c)
+    return batch_rp_si, batch_rp_c
+
+  def get_batch_data(self, sess):
+    batch_data = []
+    # [Base]
+    base_batch = self._process_a3c(sess)
+    batch_data.extend(base_batch)
+
+    # [Pixel change]
+    if USE_PIXEL_CHANGE:
+      pc_batch = self._process_pc(sess)
+      batch_data.extend(pc_batch)
+
+    # [Value replay]
+    if USE_VALUE_REPLAY:
+      vr_batch = self._process_vr(sess)
+      batch_data.extend(vr_batch)
+
+    # [Reward prediction]
+    if USE_REWARD_PREDICTION:
+      rp_batch = self._process_rp()
+      batch_data.extend(rp_batch)
+
+    return batch_data
+
+  def prepare_loss(self):
+    base_loss, entropy = self.base_loss()
+    pc_loss = self.pc_loss()
+    vr_loss = self.vr_loss()
+    rp_loss = self.rp_loss()
+      
+    return base_loss, pc_loss, vr_loss, rp_loss, entropy
+
+  def base_loss(self):
+    self.base_a = tf.placeholder(dtype=tf.float32, shape=[None, self.action_n], name='base_a')
+    self.base_adv = tf.placeholder(dtype=tf.float32, shape=[None], name='base_adv')
+    self.base_r = tf.placeholder(dtype=tf.float32, shape=[None], name='base_r')
+
+    log_pi = tf.log(tf.clip_by_value(self.base_pi, 1e-20, 1.0))
+    entropy = - tf.reduce_sum(self.base_pi*log_pi, axis=1)
+    policy_loss = - tf.reduce_sum(tf.reduce_sum(tf.multiply(log_pi, self.base_a),axis=1)*
+                                  self.base_adv + entropy * ENTROPY_BETA)
+    value_loss = 0.5 * tf.nn.l2_loss(self.base_r - self.base_v)
+    base_loss = policy_loss + value_loss
+    return base_loss, entropy
+
+  def pc_loss(self):
+    self.pc_a = tf.placeholder(dtype=tf.float32, shape=[None, self.action_n], name='pc_a')
+    self.pc_r = tf.placeholder(dtype=tf.float32, shape=[None, 20, 20], name='pc_r')
+    pc_a_reshape = tf.reshape(self.pc_a, [-1, 1, 1, self.action_n])
+    pc_qa_ = tf.multiply(self.pc_q, pc_a_reshape)
+    pc_qa = tf.reduce_sum(pc_qa_, axis=3)
+    pc_loss = tf.nn.l2_loss(self.pc_r - pc_qa) * PIXEL_CHANGE_LAMBDA
+    return pc_loss
+  
+  def vr_loss(self):
+    self.vr_r = tf.placeholder(dtype=tf.float32, shape=[None], name='vr_r')
+    vr_loss = tf.nn.l2_loss(self.vr_r - self.vr_v)
+    return vr_loss
+
+  def rp_loss(self):
+    self.rp_r = tf.placeholder(dtype=tf.float32, shape=[1,3], name='rp_r')
+    rp_c = tf.clip_by_value(self.rp_c, 1e-20, 1.0)
+    rp_loss = - tf.reduce_sum(self.rp_r * tf.log(rp_c))
+    return rp_loss
   
   def _conv2d(self, x, W, stride):
     return tf.nn.conv2d(x, W, strides = [1, stride, stride, 1], padding = "VALID")
